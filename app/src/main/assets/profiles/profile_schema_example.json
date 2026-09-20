@@ -1,0 +1,34 @@
+{
+  "id": "my-tv-profile",
+  "name": "Living Room TV",
+  "manufacturer": "Manufacturer",
+  "model": "Exact model",
+  "commands": [
+    {
+      "key": "POWER",
+      "name": "Power",
+      "type": "NEC",
+      "carrierHz": 38000,
+      "address": 0,
+      "command": 0,
+      "service": false,
+      "dangerous": false,
+      "raw": [],
+      "data32": 0,
+      "pronto": ""
+    },
+    {
+      "key": "SERVICE_MENU",
+      "name": "Documented Service Menu",
+      "type": "PRONTO",
+      "carrierHz": 38000,
+      "address": 0,
+      "command": 0,
+      "service": true,
+      "dangerous": true,
+      "raw": [],
+      "data32": 0,
+      "pronto": "0000 ..."
+    }
+  ]
+}

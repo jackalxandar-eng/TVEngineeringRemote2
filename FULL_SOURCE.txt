@@ -1,0 +1,1183 @@
+
+====================================================================================================
+FILE: .github/workflows/build-apk.yml
+====================================================================================================
+name: Build Android APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: 'platform-tools'
+
+      - name: Install Android API 35
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Set up Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Build Debug APK
+        run: gradle --no-daemon :app:assembleDebug
+
+      - name: Copy APK
+        run: cp app/build/outputs/apk/debug/app-debug.apk TV-Engineering-Remote.apk
+
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: TV-Engineering-Remote-APK
+          path: TV-Engineering-Remote.apk
+          if-no-files-found: error
+
+
+====================================================================================================
+FILE: COPY_TO_NEW_REPO.sh
+====================================================================================================
+#!/usr/bin/env bash
+set -e
+# Run this from the root of the extracted project inside a fresh GitHub Codespace.
+git add .
+git commit -m "Initial complete TV Engineering Remote app" || true
+git push origin main
+
+
+====================================================================================================
+FILE: README.md
+====================================================================================================
+# TV Engineering Remote
+
+Android IR Blaster engineering console built with **plain Android Java** to keep GitHub Actions builds simple and reliable.
+
+## Features
+
+- Physical IR emission through Android `ConsumerIrManager`.
+- Detects whether the phone exposes a Consumer IR emitter.
+- Shows carrier-frequency ranges reported by the device.
+- Remote screen with power, source, navigation, audio, channels, media and numeric keys.
+- Multiple local TV profiles.
+- Import/export profile JSON files.
+- Engineering Lab for creating and testing:
+  - RAW mark/space microseconds
+  - NEC address/command
+  - generic 32-bit pulse-distance frames
+  - learned Pronto Hex `0000`
+- Engineer-mode lock.
+- Separate Service / Hidden Commands view.
+- Sensitive-command confirmation before transmission.
+- Event/IR log.
+
+## Important IR limits
+
+IR is normally one-way. A phone can transmit but generally cannot confirm that the TV received the command. Android `ConsumerIrManager` also does not provide a generic IR-learning receiver API. For learning an original remote, use an external IR receiver and import RAW/Pronto data.
+
+Vendor service-menu codes are intentionally not invented. Add documented codes for the exact model through a profile and mark them as `service` / `dangerous` when appropriate.
+
+## GitHub Actions APK build
+
+Every push to `main` runs `.github/workflows/build-apk.yml`.
+
+When the workflow succeeds, download the artifact named:
+
+`TV-Engineering-Remote-APK`
+
+It contains:
+
+`TV-Engineering-Remote.apk`
+
+## Build stack
+
+- Android Gradle Plugin 8.7.3
+- Gradle 8.9
+- Java 17
+- compileSdk / targetSdk 35
+- No AndroidX or third-party runtime dependencies
+
+
+====================================================================================================
+FILE: app/build.gradle
+====================================================================================================
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.tvengineering.remote'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'com.tvengineering.remote'
+        minSdk 23
+        targetSdk 35
+        versionCode 1
+        versionName '1.0.0'
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+
+====================================================================================================
+FILE: app/proguard-rules.pro
+====================================================================================================
+# No custom rules required for this build.
+
+
+====================================================================================================
+FILE: app/src/main/AndroidManifest.xml
+====================================================================================================
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-feature android:name="android.hardware.consumerir" android:required="false" />
+
+    <application
+        android:allowBackup="true"
+        android:label="TV Engineering Remote"
+        android:theme="@style/AppTheme">
+        <activity
+            android:name=".MainActivity"
+            android:screenOrientation="portrait"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
+
+
+====================================================================================================
+FILE: app/src/main/assets/profiles/profile_schema_example.json
+====================================================================================================
+{
+  "id": "my-tv-profile",
+  "name": "Living Room TV",
+  "manufacturer": "Manufacturer",
+  "model": "Exact model",
+  "commands": [
+    {
+      "key": "POWER",
+      "name": "Power",
+      "type": "NEC",
+      "carrierHz": 38000,
+      "address": 0,
+      "command": 0,
+      "service": false,
+      "dangerous": false,
+      "raw": [],
+      "data32": 0,
+      "pronto": ""
+    },
+    {
+      "key": "SERVICE_MENU",
+      "name": "Documented Service Menu",
+      "type": "PRONTO",
+      "carrierHz": 38000,
+      "address": 0,
+      "command": 0,
+      "service": true,
+      "dangerous": true,
+      "raw": [],
+      "data32": 0,
+      "pronto": "0000 ..."
+    }
+  ]
+}
+
+
+====================================================================================================
+FILE: app/src/main/java/com/tvengineering/remote/MainActivity.java
+====================================================================================================
+package com.tvengineering.remote;
+
+import android.app.Activity;
+import android.app.AlertDialog;
+import android.content.Intent;
+import android.graphics.Color;
+import android.net.Uri;
+import android.os.Bundle;
+import android.provider.Settings;
+import android.text.InputType;
+import android.view.Gravity;
+import android.view.View;
+import android.widget.AdapterView;
+import android.widget.ArrayAdapter;
+import android.widget.Button;
+import android.widget.EditText;
+import android.widget.HorizontalScrollView;
+import android.widget.LinearLayout;
+import android.widget.ScrollView;
+import android.widget.Spinner;
+import android.widget.TextView;
+import android.widget.Toast;
+
+import com.tvengineering.remote.core.IrEngine;
+import com.tvengineering.remote.data.DeviceProfile;
+import com.tvengineering.remote.data.IrCommand;
+import com.tvengineering.remote.data.ProfileStore;
+
+import java.io.BufferedReader;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
+import java.text.SimpleDateFormat;
+import java.util.ArrayList;
+import java.util.Date;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+
+public class MainActivity extends Activity {
+    private static final int BG = Color.rgb(7, 11, 19);
+    private static final int PANEL = Color.rgb(17, 26, 43);
+    private static final int PANEL2 = Color.rgb(11, 19, 32);
+    private static final int TEXT = Color.rgb(240, 245, 255);
+    private static final int MUTED = Color.rgb(156, 176, 205);
+    private static final int ACCENT = Color.rgb(79, 140, 255);
+    private static final int DANGER = Color.rgb(230, 78, 103);
+    private static final int SUCCESS = Color.rgb(57, 217, 138);
+
+    private static final int REQ_IMPORT = 1001;
+    private static final int REQ_EXPORT = 1002;
+
+    private IrEngine ir;
+    private ProfileStore store;
+    private List<DeviceProfile> profiles;
+    private DeviceProfile selected;
+    private boolean engineerMode = false;
+
+    private LinearLayout pageHost;
+    private TextView statusText;
+    private TextView logText;
+    private Spinner profileSpinner;
+    private final List<String> logLines = new ArrayList<>();
+
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        ir = new IrEngine(this);
+        store = new ProfileStore(this);
+        profiles = store.load();
+        selected = profiles.get(0);
+        buildShell();
+        showRemote();
+        log("APP ready");
+        log(ir.hasEmitter() ? "IR emitter detected" : "No Consumer IR emitter detected on this device");
+    }
+
+    private void buildShell() {
+        getWindow().setStatusBarColor(BG);
+        getWindow().setNavigationBarColor(BG);
+
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setBackgroundColor(BG);
+        root.setPadding(dp(12), dp(10), dp(12), dp(10));
+
+        LinearLayout header = new LinearLayout(this);
+        header.setOrientation(LinearLayout.VERTICAL);
+        header.setPadding(dp(14), dp(12), dp(14), dp(12));
+        header.setBackgroundColor(PANEL);
+
+        TextView title = text("TV Engineering Remote", 22, TEXT, true);
+        header.addView(title);
+        statusText = text(irStatus(), 12, ir.hasEmitter() ? SUCCESS : DANGER, false);
+        statusText.setPadding(0, dp(4), 0, 0);
+        header.addView(statusText);
+        root.addView(header, matchWrap());
+
+        HorizontalScrollView tabsScroll = new HorizontalScrollView(this);
+        tabsScroll.setHorizontalScrollBarEnabled(false);
+        LinearLayout tabs = new LinearLayout(this);
+        tabs.setOrientation(LinearLayout.HORIZONTAL);
+        tabs.setPadding(0, dp(8), 0, dp(8));
+        tabs.addView(tabButton("Remote", v -> showRemote()));
+        tabs.addView(tabButton("Profiles", v -> showProfiles()));
+        tabs.addView(tabButton("Engineer", v -> showEngineer()));
+        tabs.addView(tabButton("Service", v -> showService()));
+        tabs.addView(tabButton("Logs", v -> showLogs()));
+        tabsScroll.addView(tabs);
+        root.addView(tabsScroll, matchWrap());
+
+        pageHost = new LinearLayout(this);
+        pageHost.setOrientation(LinearLayout.VERTICAL);
+        ScrollView scroll = new ScrollView(this);
+        scroll.setFillViewport(true);
+        scroll.addView(pageHost, matchWrap());
+        root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1f));
+
+        setContentView(root);
+    }
+
+    private String irStatus() {
+        return ir.hasEmitter() ? "IR READY • " + ir.carrierRangesText() : "IR unavailable • use a phone with Consumer IR / IR Blaster";
+    }
+
+    private void clearPage() {
+        pageHost.removeAllViews();
+        pageHost.setPadding(0, 0, 0, dp(24));
+    }
+
+    private void showRemote() {
+        clearPage();
+        addSectionTitle("Remote Control");
+        profileSpinner = new Spinner(this);
+        ArrayAdapter<String> adapter = new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item, profileNames());
+        profileSpinner.setAdapter(adapter);
+        profileSpinner.setSelection(Math.max(0, profiles.indexOf(selected)));
+        profileSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
+                selected = profiles.get(position);
+                log("Selected profile: " + selected.name);
+            }
+            @Override public void onNothingSelected(AdapterView<?> parent) { }
+        });
+        pageHost.addView(profileSpinner, matchWrap());
+
+        addInfoCard("Hardware", irStatus());
+        addInfoCard("Profile", selected.name + " • " + selected.manufacturer + " • " + selected.model);
+
+        LinearLayout powerRow = horizontal();
+        Button power = actionButton("POWER", DANGER, v -> sendKey("POWER"));
+        powerRow.addView(power, weighted());
+        Button source = actionButton("SOURCE", ACCENT, v -> sendKey("SOURCE"));
+        powerRow.addView(source, weighted());
+        pageHost.addView(powerRow, matchWrap());
+
+        addRemoteRow(new String[]{"HOME", "MENU", "INFO"});
+        addRemoteRow(new String[]{"UP"});
+        addRemoteRow(new String[]{"LEFT", "OK", "RIGHT"});
+        addRemoteRow(new String[]{"DOWN"});
+        addRemoteRow(new String[]{"BACK", "EXIT", "MUTE"});
+        addRemoteRow(new String[]{"VOL_DOWN", "VOL_UP", "CH_UP", "CH_DOWN"});
+        addRemoteRow(new String[]{"PLAY_PAUSE", "STOP", "GUIDE"});
+
+        addSectionTitle("Numeric keypad");
+        for (int r = 0; r < 3; r++) {
+            String[] keys = new String[3];
+            for (int c = 0; c < 3; c++) keys[c] = String.valueOf(r * 3 + c + 1);
+            addRemoteRow(keys);
+        }
+        addRemoteRow(new String[]{"0"});
+
+        TextView hint = text("If a button is not defined in the selected profile, create/import its IR code in Engineer mode.", 12, MUTED, false);
+        hint.setPadding(dp(4), dp(16), dp(4), 0);
+        pageHost.addView(hint);
+    }
+
+    private void addRemoteRow(String[] keys) {
+        LinearLayout row = horizontal();
+        for (String key : keys) row.addView(actionButton(key, PANEL, v -> sendKey(key)), weighted());
+        pageHost.addView(row, matchWrap());
+    }
+
+    private void sendKey(String key) {
+        IrCommand c = selected.commands.get(key);
+        if (c == null) {
+            log("Missing command " + key + " in profile " + selected.name);
+            toast("Command not defined: " + key);
+            return;
+        }
+        if (c.service && !engineerMode) {
+            toast("Engineer mode required");
+            return;
+        }
+        if (c.dangerous) {
+            new AlertDialog.Builder(this)
+                    .setTitle("Sensitive IR command")
+                    .setMessage("This command is marked dangerous and may change service/factory settings. Send only to a TV you are authorized to service.")
+                    .setNegativeButton("Cancel", null)
+                    .setPositiveButton("Send", (d, w) -> transmit(c, key))
+                    .show();
+        } else transmit(c, key);
+    }
+
+    private void transmit(IrCommand c, String label) {
+        try {
+            ir.transmit(c);
+            log("TX " + label + " • " + c.type + " • " + c.carrierHz + " Hz");
+            toast("Sent: " + label);
+        } catch (Exception e) {
+            log("ERROR " + label + " • " + e.getMessage());
+            toast(e.getMessage());
+        }
+    }
+
+    private void showProfiles() {
+        clearPage();
+        addSectionTitle("TV Profiles");
+        for (DeviceProfile p : profiles) {
+            LinearLayout card = card();
+            card.addView(text(p.name, 17, TEXT, true));
+            card.addView(text(p.manufacturer + " • " + p.model + " • " + p.commands.size() + " commands", 12, MUTED, false));
+            LinearLayout row = horizontal();
+            row.addView(actionButton("Use", ACCENT, v -> { selected = p; showRemote(); }), weighted());
+            row.addView(actionButton("Export", PANEL, v -> exportProfile(p)), weighted());
+            if (!"starter".equals(p.id)) row.addView(actionButton("Delete", DANGER, v -> confirmDelete(p)), weighted());
+            card.addView(row);
+            pageHost.addView(card, matchWrap());
+        }
+
+        LinearLayout row = horizontal();
+        row.addView(actionButton("New profile", ACCENT, v -> newProfileDialog()), weighted());
+        row.addView(actionButton("Import JSON", PANEL, v -> importProfile()), weighted());
+        pageHost.addView(row, matchWrap());
+
+        addInfoCard("Profile format", "Profiles are local JSON files. Commands can be RAW microseconds, NEC address/command, 32-bit pulse-distance data, or learned Pronto 0000.");
+    }
+
+    private void newProfileDialog() {
+        LinearLayout box = vertical();
+        EditText name = input("Profile name");
+        EditText maker = input("Manufacturer");
+        EditText model = input("Model");
+        box.addView(name); box.addView(maker); box.addView(model);
+        new AlertDialog.Builder(this)
+                .setTitle("Create TV profile")
+                .setView(box)
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Create", (d, w) -> {
+                    DeviceProfile p = new DeviceProfile();
+                    p.id = "p-" + System.currentTimeMillis();
+                    p.name = nonEmpty(name.getText().toString(), "New TV");
+                    p.manufacturer = nonEmpty(maker.getText().toString(), "Generic");
+                    p.model = nonEmpty(model.getText().toString(), "Unknown");
+                    profiles.add(p); selected = p; store.save(profiles); showProfiles();
+                    log("Created profile " + p.name);
+                }).show();
+    }
+
+    private void confirmDelete(DeviceProfile p) {
+        new AlertDialog.Builder(this).setTitle("Delete profile?").setMessage(p.name)
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Delete", (d, w) -> {
+                    profiles.remove(p);
+                    if (profiles.isEmpty()) profiles = store.load();
+                    selected = profiles.get(0); store.save(profiles); showProfiles();
+                }).show();
+    }
+
+    private void showEngineer() {
+        clearPage();
+        addSectionTitle("Engineering Lab");
+        addInfoCard("IR hardware", irStatus());
+
+        Button unlock = actionButton(engineerMode ? "Engineer mode: ENABLED" : "Unlock Engineer mode", engineerMode ? SUCCESS : DANGER, v -> unlockEngineer());
+        pageHost.addView(unlock, matchWrap());
+
+        if (!engineerMode) {
+            addInfoCard("Locked", "Advanced command creation and service controls are disabled. Unlock only when you are working on equipment you own or are authorized to service.");
+            return;
+        }
+
+        EditText key = input("Button key, e.g. POWER or PANEL_TEST");
+        EditText name = input("Display name");
+        Spinner type = new Spinner(this);
+        type.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item, new String[]{"RAW", "NEC", "PULSE32", "PRONTO"}));
+        EditText carrier = input("Carrier Hz (default 38000)"); carrier.setText("38000");
+        EditText address = input("NEC address: decimal or 0x.. ");
+        EditText command = input("NEC command: decimal or 0x.. ");
+        EditText data32 = input("32-bit data: decimal or 0x........");
+        EditText raw = input("RAW microseconds: 9000,4500,560,...");
+        raw.setMinLines(3);
+        EditText pronto = input("Pronto 0000 hex string"); pronto.setMinLines(3);
+
+        pageHost.addView(key); pageHost.addView(name); pageHost.addView(type); pageHost.addView(carrier);
+        pageHost.addView(address); pageHost.addView(command); pageHost.addView(data32); pageHost.addView(raw); pageHost.addView(pronto);
+
+        Button test = actionButton("Test current command", ACCENT, v -> {
+            try { transmit(buildCommand(name, type, carrier, address, command, data32, raw, pronto, false, false), "TEST"); }
+            catch (Exception e) { toast(e.getMessage()); log("Builder error: " + e.getMessage()); }
+        });
+        pageHost.addView(test, matchWrap());
+
+        Button saveNormal = actionButton("Save as normal button", PANEL, v -> saveBuiltCommand(key, name, type, carrier, address, command, data32, raw, pronto, false, false));
+        Button saveService = actionButton("Save as service command", PANEL, v -> saveBuiltCommand(key, name, type, carrier, address, command, data32, raw, pronto, true, false));
+        Button saveDanger = actionButton("Save as sensitive service command", DANGER, v -> saveBuiltCommand(key, name, type, carrier, address, command, data32, raw, pronto, true, true));
+        pageHost.addView(saveNormal, matchWrap()); pageHost.addView(saveService, matchWrap()); pageHost.addView(saveDanger, matchWrap());
+
+        addInfoCard("Learn IR", "Android ConsumerIrManager transmits IR but does not provide an IR receiver API. To learn a remote, use an external receiver and import RAW or Pronto 0000 data here.");
+    }
+
+    private IrCommand buildCommand(EditText name, Spinner type, EditText carrier, EditText address, EditText command, EditText data32, EditText raw, EditText pronto, boolean service, boolean dangerous) {
+        IrCommand c = new IrCommand();
+        c.name = nonEmpty(name.getText().toString(), "COMMAND");
+        c.type = IrCommand.Type.valueOf(type.getSelectedItem().toString());
+        c.carrierHz = Integer.parseInt(nonEmpty(carrier.getText().toString(), "38000"));
+        c.service = service; c.dangerous = dangerous;
+        switch (c.type) {
+            case NEC:
+                c.address = IrEngine.parseIntFlexible(nonEmpty(address.getText().toString(), "0"));
+                c.command = IrEngine.parseIntFlexible(nonEmpty(command.getText().toString(), "0"));
+                break;
+            case PULSE32:
+                c.data32 = IrEngine.parseLongFlexible(nonEmpty(data32.getText().toString(), "0"));
+                break;
+            case PRONTO:
+                c.pronto = pronto.getText().toString().trim();
+                break;
+            case RAW:
+            default:
+                c.rawPattern = IrEngine.parseRaw(raw.getText().toString());
+                break;
+        }
+        return c;
+    }
+
+    private void saveBuiltCommand(EditText key, EditText name, Spinner type, EditText carrier, EditText address, EditText command, EditText data32, EditText raw, EditText pronto, boolean service, boolean dangerous) {
+        try {
+            String k = key.getText().toString().trim().toUpperCase(Locale.US);
+            if (k.isEmpty()) throw new IllegalArgumentException("Enter a button key.");
+            IrCommand c = buildCommand(name, type, carrier, address, command, data32, raw, pronto, service, dangerous);
+            selected.commands.put(k, c);
+            store.save(profiles);
+            log("Saved " + k + " to " + selected.name + (service ? " [service]" : ""));
+            toast("Saved: " + k);
+        } catch (Exception e) { toast(e.getMessage()); }
+    }
+
+    private void unlockEngineer() {
+        if (engineerMode) {
+            engineerMode = false; showEngineer(); log("Engineer mode disabled"); return;
+        }
+        EditText phrase = input("Type ENGINEER");
+        phrase.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS);
+        new AlertDialog.Builder(this)
+                .setTitle("Engineer mode")
+                .setMessage("Advanced IR commands can alter factory/service settings. Type ENGINEER to continue.")
+                .setView(phrase)
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Unlock", (d, w) -> {
+                    if ("ENGINEER".equalsIgnoreCase(phrase.getText().toString().trim())) {
+                        engineerMode = true; log("Engineer mode enabled"); showEngineer();
+                    } else toast("Phrase did not match");
+                }).show();
+    }
+
+    private void showService() {
+        clearPage();
+        addSectionTitle("Service / Hidden Commands");
+        if (!engineerMode) {
+            addInfoCard("Locked", "Unlock Engineer mode first. Service commands are loaded only from the active device profile; this app does not invent vendor factory codes.");
+            pageHost.addView(actionButton("Unlock", DANGER, v -> unlockEngineer()), matchWrap());
+            return;
+        }
+        boolean any = false;
+        for (Map.Entry<String, IrCommand> e : selected.commands.entrySet()) {
+            IrCommand c = e.getValue();
+            if (!c.service) continue;
+            any = true;
+            LinearLayout row = card();
+            row.addView(text(e.getKey() + " • " + c.name, 16, c.dangerous ? DANGER : TEXT, true));
+            row.addView(text(c.type + " • " + c.carrierHz + " Hz" + (c.dangerous ? " • SENSITIVE" : ""), 12, MUTED, false));
+            row.addView(actionButton("Send", c.dangerous ? DANGER : ACCENT, v -> sendKey(e.getKey())), matchWrap());
+            pageHost.addView(row, matchWrap());
+        }
+        if (!any) addInfoCard("No service commands", "Add documented service commands for this exact TV model from Engineer mode, then they will appear here.");
+    }
+
+    private void showLogs() {
+        clearPage();
+        addSectionTitle("IR Event Log");
+        logText = text(logTextValue(), 12, TEXT, false);
+        logText.setTypeface(android.graphics.Typeface.MONOSPACE);
+        logText.setPadding(dp(12), dp(12), dp(12), dp(12));
+        logText.setBackgroundColor(PANEL2);
+        pageHost.addView(logText, matchWrap());
+        pageHost.addView(actionButton("Clear log", PANEL, v -> { logLines.clear(); showLogs(); }), matchWrap());
+    }
+
+    private void importProfile() {
+        Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        i.setType("application/json");
+        i.addCategory(Intent.CATEGORY_OPENABLE);
+        startActivityForResult(i, REQ_IMPORT);
+    }
+
+    private void exportProfile(DeviceProfile p) {
+        selected = p;
+        Intent i = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+        i.setType("application/json");
+        i.putExtra(Intent.EXTRA_TITLE, safeFileName(p.name) + ".json");
+        startActivityForResult(i, REQ_EXPORT);
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (resultCode != RESULT_OK || data == null || data.getData() == null) return;
+        Uri uri = data.getData();
+        try {
+            if (requestCode == REQ_IMPORT) {
+                String json = readAll(uri);
+                DeviceProfile p = store.importProfile(json);
+                profiles.add(p); selected = p; store.save(profiles); log("Imported profile " + p.name); showProfiles();
+            } else if (requestCode == REQ_EXPORT) {
+                String json = store.exportProfile(selected);
+                try (OutputStream os = getContentResolver().openOutputStream(uri, "wt")) {
+                    if (os == null) throw new IllegalStateException("Cannot open output document");
+                    os.write(json.getBytes(StandardCharsets.UTF_8));
+                }
+                toast("Profile exported");
+            }
+        } catch (Exception e) { toast(e.getMessage()); log("File error: " + e.getMessage()); }
+    }
+
+    private String readAll(Uri uri) throws Exception {
+        StringBuilder sb = new StringBuilder();
+        try (InputStream is = getContentResolver().openInputStream(uri);
+             BufferedReader br = new BufferedReader(new InputStreamReader(is, StandardCharsets.UTF_8))) {
+            String line; while ((line = br.readLine()) != null) sb.append(line).append('\n');
+        }
+        return sb.toString();
+    }
+
+    private List<String> profileNames() {
+        List<String> names = new ArrayList<>();
+        for (DeviceProfile p : profiles) names.add(p.name + " — " + p.manufacturer);
+        return names;
+    }
+
+    private void log(String msg) {
+        String t = new SimpleDateFormat("HH:mm:ss", Locale.US).format(new Date());
+        logLines.add(0, "[" + t + "] " + msg);
+        if (logLines.size() > 200) logLines.remove(logLines.size() - 1);
+        if (logText != null) logText.setText(logTextValue());
+    }
+
+    private String logTextValue() {
+        if (logLines.isEmpty()) return "No events yet.";
+        StringBuilder sb = new StringBuilder();
+        for (String s : logLines) sb.append(s).append('\n');
+        return sb.toString();
+    }
+
+    private void addSectionTitle(String title) {
+        TextView t = text(title, 20, TEXT, true);
+        t.setPadding(dp(4), dp(14), dp(4), dp(10));
+        pageHost.addView(t);
+    }
+
+    private void addInfoCard(String title, String body) {
+        LinearLayout c = card();
+        c.addView(text(title, 15, TEXT, true));
+        TextView b = text(body, 12, MUTED, false); b.setPadding(0, dp(5), 0, 0); c.addView(b);
+        pageHost.addView(c, matchWrap());
+    }
+
+    private LinearLayout card() {
+        LinearLayout c = vertical();
+        c.setPadding(dp(14), dp(12), dp(14), dp(12));
+        c.setBackgroundColor(PANEL);
+        LinearLayout.LayoutParams lp = matchWrap();
+        lp.setMargins(0, dp(6), 0, dp(6));
+        c.setLayoutParams(lp);
+        return c;
+    }
+
+    private Button tabButton(String label, View.OnClickListener l) {
+        Button b = actionButton(label, PANEL, l);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(120), dp(48));
+        lp.setMargins(dp(4), 0, dp(4), 0);
+        b.setLayoutParams(lp);
+        return b;
+    }
+
+    private Button actionButton(String label, int color, View.OnClickListener l) {
+        Button b = new Button(this);
+        b.setText(label);
+        b.setTextColor(TEXT);
+        b.setTextSize(13);
+        b.setAllCaps(false);
+        b.setBackgroundColor(color);
+        b.setOnClickListener(l);
+        b.setPadding(dp(8), dp(4), dp(8), dp(4));
+        LinearLayout.LayoutParams lp = matchWrap();
+        lp.setMargins(dp(4), dp(5), dp(4), dp(5));
+        b.setLayoutParams(lp);
+        return b;
+    }
+
+    private EditText input(String hint) {
+        EditText e = new EditText(this);
+        e.setHint(hint);
+        e.setHintTextColor(MUTED);
+        e.setTextColor(TEXT);
+        e.setSingleLine(false);
+        e.setPadding(dp(12), dp(10), dp(12), dp(10));
+        e.setBackgroundColor(PANEL2);
+        LinearLayout.LayoutParams lp = matchWrap(); lp.setMargins(0, dp(5), 0, dp(5)); e.setLayoutParams(lp);
+        return e;
+    }
+
+    private TextView text(String s, int sp, int color, boolean bold) {
+        TextView t = new TextView(this);
+        t.setText(s); t.setTextSize(sp); t.setTextColor(color);
+        if (bold) t.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+        return t;
+    }
+
+    private LinearLayout vertical() { LinearLayout l = new LinearLayout(this); l.setOrientation(LinearLayout.VERTICAL); return l; }
+    private LinearLayout horizontal() { LinearLayout l = new LinearLayout(this); l.setOrientation(LinearLayout.HORIZONTAL); l.setGravity(Gravity.CENTER_VERTICAL); return l; }
+    private LinearLayout.LayoutParams matchWrap() { return new LinearLayout.LayoutParams(-1, -2); }
+    private LinearLayout.LayoutParams weighted() { LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(0, dp(52), 1f); p.setMargins(dp(4), dp(4), dp(4), dp(4)); return p; }
+    private int dp(int v) { return Math.round(v * getResources().getDisplayMetrics().density); }
+    private void toast(String s) { Toast.makeText(this, s, Toast.LENGTH_SHORT).show(); }
+    private String nonEmpty(String s, String fallback) { return s == null || s.trim().isEmpty() ? fallback : s.trim(); }
+    private String safeFileName(String s) { return s.replaceAll("[^a-zA-Z0-9._-]+", "_"); }
+}
+
+
+====================================================================================================
+FILE: app/src/main/java/com/tvengineering/remote/core/IrEngine.java
+====================================================================================================
+package com.tvengineering.remote.core;
+
+import android.content.Context;
+import android.hardware.ConsumerIrManager;
+
+import com.tvengineering.remote.data.IrCommand;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Locale;
+
+public class IrEngine {
+    private final ConsumerIrManager manager;
+
+    public IrEngine(Context context) {
+        manager = (ConsumerIrManager) context.getSystemService(Context.CONSUMER_IR_SERVICE);
+    }
+
+    public boolean hasEmitter() {
+        return manager != null && manager.hasIrEmitter();
+    }
+
+    public String carrierRangesText() {
+        if (!hasEmitter()) return "No IR emitter detected";
+        ConsumerIrManager.CarrierFrequencyRange[] ranges = manager.getCarrierFrequencies();
+        if (ranges == null || ranges.length == 0) return "IR emitter detected; carrier ranges not reported";
+        StringBuilder sb = new StringBuilder();
+        for (ConsumerIrManager.CarrierFrequencyRange r : ranges) {
+            if (sb.length() > 0) sb.append(" | ");
+            sb.append(r.getMinFrequency()).append("-").append(r.getMaxFrequency()).append(" Hz");
+        }
+        return sb.toString();
+    }
+
+    public void transmit(IrCommand command) {
+        if (!hasEmitter()) throw new IllegalStateException("This Android device does not expose a Consumer IR emitter.");
+        int carrier = command.carrierHz <= 0 ? 38000 : command.carrierHz;
+        int[] pattern;
+        switch (command.type) {
+            case NEC:
+                pattern = nec(command.address, command.command);
+                break;
+            case PULSE32:
+                pattern = pulseDistance32(command.data32);
+                break;
+            case PRONTO:
+                ProntoResult pr = parsePronto0000(command.pronto);
+                carrier = pr.carrierHz;
+                pattern = pr.pattern;
+                break;
+            case RAW:
+            default:
+                pattern = command.rawPattern;
+                break;
+        }
+        validate(carrier, pattern);
+        manager.transmit(carrier, pattern);
+    }
+
+    public static void validate(int carrier, int[] pattern) {
+        if (carrier < 20000 || carrier > 100000) throw new IllegalArgumentException("Carrier must be between 20 kHz and 100 kHz.");
+        if (pattern == null || pattern.length < 2) throw new IllegalArgumentException("IR pattern is empty.");
+        long total = 0;
+        for (int v : pattern) {
+            if (v <= 0) throw new IllegalArgumentException("Every mark/space duration must be > 0 microseconds.");
+            total += v;
+        }
+        if (total >= 2_000_000L) throw new IllegalArgumentException("Android requires each IR transmission pattern to be shorter than 2 seconds.");
+    }
+
+    public static int[] nec(int address, int command) {
+        int addr = address & 0xFF;
+        int cmd = command & 0xFF;
+        long frame = (long) addr |
+                ((long) ((~addr) & 0xFF) << 8) |
+                ((long) cmd << 16) |
+                ((long) ((~cmd) & 0xFF) << 24);
+        List<Integer> p = new ArrayList<>();
+        p.add(9000); p.add(4500);
+        for (int i = 0; i < 32; i++) {
+            p.add(560);
+            p.add(((frame >>> i) & 1L) == 1L ? 1690 : 560);
+        }
+        p.add(560);
+        return toArray(p);
+    }
+
+    public static int[] pulseDistance32(long data) {
+        List<Integer> p = new ArrayList<>();
+        p.add(4500); p.add(4500);
+        for (int i = 31; i >= 0; i--) {
+            p.add(560);
+            p.add(((data >>> i) & 1L) == 1L ? 1690 : 560);
+        }
+        p.add(560);
+        return toArray(p);
+    }
+
+    private static int[] toArray(List<Integer> p) {
+        int[] out = new int[p.size()];
+        for (int i = 0; i < p.size(); i++) out[i] = p.get(i);
+        return out;
+    }
+
+    public static int[] parseRaw(String text) {
+        String clean = text == null ? "" : text.trim().replace('[', ' ').replace(']', ' ');
+        if (clean.isEmpty()) return new int[0];
+        String[] parts = clean.split("[,\\s]+");
+        int[] out = new int[parts.length];
+        for (int i = 0; i < parts.length; i++) out[i] = Integer.parseInt(parts[i]);
+        return out;
+    }
+
+    public static long parseLongFlexible(String value) {
+        String s = value == null ? "" : value.trim().toLowerCase(Locale.US);
+        if (s.startsWith("0x")) return Long.parseUnsignedLong(s.substring(2), 16);
+        return Long.parseLong(s);
+    }
+
+    public static int parseIntFlexible(String value) {
+        long v = parseLongFlexible(value);
+        return (int) v;
+    }
+
+    public static class ProntoResult {
+        public final int carrierHz;
+        public final int[] pattern;
+        public ProntoResult(int carrierHz, int[] pattern) { this.carrierHz = carrierHz; this.pattern = pattern; }
+    }
+
+    public static ProntoResult parsePronto0000(String pronto) {
+        if (pronto == null) throw new IllegalArgumentException("Pronto text is empty.");
+        String[] parts = pronto.trim().split("\\s+");
+        if (parts.length < 6) throw new IllegalArgumentException("Invalid Pronto 0000 sequence.");
+        int[] words = new int[parts.length];
+        for (int i = 0; i < parts.length; i++) words[i] = Integer.parseInt(parts[i], 16);
+        if (words[0] != 0x0000) throw new IllegalArgumentException("Only learned Pronto format 0000 is supported.");
+        if (words[1] == 0) throw new IllegalArgumentException("Invalid Pronto frequency word.");
+        double carrier = 1_000_000.0 / (words[1] * 0.241246);
+        double periodUs = 1_000_000.0 / carrier;
+        int introPairs = words[2];
+        int repeatPairs = words[3];
+        int availablePairs = Math.max(0, (words.length - 4) / 2);
+        int pairs = Math.min(availablePairs, introPairs > 0 ? introPairs : repeatPairs);
+        if (pairs == 0) pairs = availablePairs;
+        int[] pattern = new int[pairs * 2];
+        for (int i = 0; i < pattern.length; i++) {
+            pattern[i] = Math.max(1, (int) Math.round(words[4 + i] * periodUs));
+        }
+        return new ProntoResult((int) Math.round(carrier), pattern);
+    }
+}
+
+
+====================================================================================================
+FILE: app/src/main/java/com/tvengineering/remote/data/DeviceProfile.java
+====================================================================================================
+package com.tvengineering.remote.data;
+
+import org.json.JSONArray;
+import org.json.JSONException;
+import org.json.JSONObject;
+
+import java.util.LinkedHashMap;
+import java.util.Map;
+
+public class DeviceProfile {
+    public String id = "profile";
+    public String name = "Unnamed TV";
+    public String manufacturer = "Generic";
+    public String model = "Unknown";
+    public final LinkedHashMap<String, IrCommand> commands = new LinkedHashMap<>();
+
+    public JSONObject toJson() throws JSONException {
+        JSONObject o = new JSONObject();
+        o.put("id", id);
+        o.put("name", name);
+        o.put("manufacturer", manufacturer);
+        o.put("model", model);
+        JSONArray arr = new JSONArray();
+        for (Map.Entry<String, IrCommand> e : commands.entrySet()) {
+            JSONObject c = e.getValue().toJson();
+            c.put("key", e.getKey());
+            arr.put(c);
+        }
+        o.put("commands", arr);
+        return o;
+    }
+
+    public static DeviceProfile fromJson(JSONObject o) throws JSONException {
+        DeviceProfile p = new DeviceProfile();
+        p.id = o.optString("id", "profile-" + System.currentTimeMillis());
+        p.name = o.optString("name", "Unnamed TV");
+        p.manufacturer = o.optString("manufacturer", "Generic");
+        p.model = o.optString("model", "Unknown");
+        JSONArray arr = o.optJSONArray("commands");
+        if (arr != null) {
+            for (int i = 0; i < arr.length(); i++) {
+                JSONObject cj = arr.getJSONObject(i);
+                String key = cj.optString("key", cj.optString("name", "CMD_" + i));
+                p.commands.put(key, IrCommand.fromJson(cj));
+            }
+        }
+        return p;
+    }
+}
+
+
+====================================================================================================
+FILE: app/src/main/java/com/tvengineering/remote/data/IrCommand.java
+====================================================================================================
+package com.tvengineering.remote.data;
+
+import org.json.JSONArray;
+import org.json.JSONException;
+import org.json.JSONObject;
+
+public class IrCommand {
+    public enum Type { RAW, NEC, PRONTO, PULSE32 }
+
+    public String name;
+    public Type type = Type.RAW;
+    public int carrierHz = 38000;
+    public int[] rawPattern = new int[0];
+    public int address = 0;
+    public int command = 0;
+    public long data32 = 0;
+    public String pronto = "";
+    public boolean service = false;
+    public boolean dangerous = false;
+
+    public JSONObject toJson() throws JSONException {
+        JSONObject o = new JSONObject();
+        o.put("name", name);
+        o.put("type", type.name());
+        o.put("carrierHz", carrierHz);
+        o.put("address", address);
+        o.put("command", command);
+        o.put("data32", data32);
+        o.put("pronto", pronto);
+        o.put("service", service);
+        o.put("dangerous", dangerous);
+        JSONArray arr = new JSONArray();
+        for (int v : rawPattern) arr.put(v);
+        o.put("raw", arr);
+        return o;
+    }
+
+    public static IrCommand fromJson(JSONObject o) throws JSONException {
+        IrCommand c = new IrCommand();
+        c.name = o.optString("name", "COMMAND");
+        try { c.type = Type.valueOf(o.optString("type", "RAW").toUpperCase()); }
+        catch (Exception ignored) { c.type = Type.RAW; }
+        c.carrierHz = o.optInt("carrierHz", 38000);
+        c.address = o.optInt("address", 0);
+        c.command = o.optInt("command", 0);
+        c.data32 = o.optLong("data32", 0);
+        c.pronto = o.optString("pronto", "");
+        c.service = o.optBoolean("service", false);
+        c.dangerous = o.optBoolean("dangerous", false);
+        JSONArray a = o.optJSONArray("raw");
+        if (a != null) {
+            c.rawPattern = new int[a.length()];
+            for (int i = 0; i < a.length(); i++) c.rawPattern[i] = a.optInt(i, 0);
+        }
+        return c;
+    }
+}
+
+
+====================================================================================================
+FILE: app/src/main/java/com/tvengineering/remote/data/ProfileStore.java
+====================================================================================================
+package com.tvengineering.remote.data;
+
+import android.content.Context;
+import android.content.SharedPreferences;
+
+import org.json.JSONArray;
+import org.json.JSONObject;
+
+import java.util.ArrayList;
+import java.util.List;
+
+public class ProfileStore {
+    private static final String PREF = "tv_engineering_profiles";
+    private static final String KEY = "profiles_json";
+    private final SharedPreferences prefs;
+
+    public ProfileStore(Context context) {
+        prefs = context.getSharedPreferences(PREF, Context.MODE_PRIVATE);
+    }
+
+    public List<DeviceProfile> load() {
+        List<DeviceProfile> out = new ArrayList<>();
+        try {
+            String saved = prefs.getString(KEY, null);
+            if (saved != null) {
+                JSONArray arr = new JSONArray(saved);
+                for (int i = 0; i < arr.length(); i++) out.add(DeviceProfile.fromJson(arr.getJSONObject(i)));
+            }
+        } catch (Exception ignored) { }
+        if (out.isEmpty()) out.add(createStarterProfile());
+        return out;
+    }
+
+    public void save(List<DeviceProfile> profiles) {
+        try {
+            JSONArray arr = new JSONArray();
+            for (DeviceProfile p : profiles) arr.put(p.toJson());
+            prefs.edit().putString(KEY, arr.toString()).apply();
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    public String exportProfile(DeviceProfile p) {
+        try { return p.toJson().toString(2); }
+        catch (Exception e) { throw new RuntimeException(e); }
+    }
+
+    public DeviceProfile importProfile(String json) {
+        try { return DeviceProfile.fromJson(new JSONObject(json)); }
+        catch (Exception e) { throw new IllegalArgumentException("Invalid profile JSON: " + e.getMessage(), e); }
+    }
+
+    private DeviceProfile createStarterProfile() {
+        DeviceProfile p = new DeviceProfile();
+        p.id = "starter";
+        p.name = "Engineering Lab Profile";
+        p.manufacturer = "Generic";
+        p.model = "Import or create commands";
+        return p;
+    }
+}
+
+
+====================================================================================================
+FILE: app/src/main/res/values/colors.xml
+====================================================================================================
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="bg">#070B13</color>
+    <color name="panel">#111A2B</color>
+    <color name="panel2">#0B1320</color>
+    <color name="line">#2B3A55</color>
+    <color name="text">#F0F5FF</color>
+    <color name="muted">#9CB0CD</color>
+    <color name="accent">#4F8CFF</color>
+    <color name="danger">#E64E67</color>
+    <color name="success">#39D98A</color>
+</resources>
+
+
+====================================================================================================
+FILE: app/src/main/res/values/strings.xml
+====================================================================================================
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">TV Engineering Remote</string>
+</resources>
+
+
+====================================================================================================
+FILE: app/src/main/res/values/styles.xml
+====================================================================================================
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="AppTheme" parent="android:style/Theme.Material.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:colorAccent">@color/accent</item>
+        <item name="android:navigationBarColor">@color/bg</item>
+        <item name="android:statusBarColor">@color/bg</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowActionModeOverlay">true</item>
+    </style>
+</resources>
+
+
+====================================================================================================
+FILE: build.gradle
+====================================================================================================
+plugins {
+    id 'com.android.application' version '8.7.3' apply false
+}
+
+
+====================================================================================================
+FILE: gradle.properties
+====================================================================================================
+org.gradle.jvmargs=-Xmx2g -Dfile.encoding=UTF-8
+android.useAndroidX=false
+android.nonTransitiveRClass=true
+
+
+====================================================================================================
+FILE: settings.gradle
+====================================================================================================
+pluginManagement {
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+rootProject.name = 'TVEngineeringRemote'
+include ':app'
+
